@@ -8,25 +8,36 @@ from checker import generate_report, get_doctr_model
 
 app = FastAPI()
 
-# Hold models in memory after first use
 MODELS = {
     "logo": None,
     "ocr": None
 }
 
 def load_models():
-    """Helper to load models only when needed."""
+    """Helper to load models with absolute path resolution."""
+    # This finds the exact absolute path of the folder where main.py sits
     base_path = os.path.dirname(os.path.abspath(__file__))
     
     if MODELS["logo"] is None:
-        # FIXED: Pointing to best.pt in the root directory
-        model_path = os.path.join(base_path, "best.pt")
-        print(f"Loading YOLO model from: {model_path}")
+        # Check both the root and the weights folder just in case
+        potential_paths = [
+            os.path.join(base_path, "best.pt"),
+            os.path.join(base_path, "weights", "best.pt"),
+            "/opt/render/project/src/best.pt" # Render's standard absolute path
+        ]
         
-        if not os.path.exists(model_path):
-            raise FileNotFoundError(f"Model weights not found at {model_path}")
-            
-        MODELS["logo"] = YOLO(model_path)
+        model_path = None
+        for path in potential_paths:
+            if os.path.exists(path):
+                model_path = path
+                break
+        
+        if model_path:
+            print(f"✅ Success: Loading YOLO model from {model_path}")
+            MODELS["logo"] = YOLO(model_path)
+        else:
+            # This specific error will now show up in your Swagger UI
+            raise FileNotFoundError(f"❌ Model weights 'best.pt' not found. Searched: {potential_paths}")
     
     if MODELS["ocr"] is None:
         print("Loading docTR model...")
@@ -36,7 +47,6 @@ def load_models():
 
 @app.get("/")
 def health_check():
-    # Keep this for monitoring Render's lazy memory mode
     return {"status": "online", "memory_mode": "lazy"}
 
 @app.post("/audit")
@@ -46,28 +56,28 @@ async def audit_pubmat(
     collaborators: str = Form("[]") 
 ):
     try:
-        # 1. Load models (only if they aren't loaded yet)
         logo_model, _ = load_models()
 
-        # 2. Process image
         contents = await file.read()
         nparr = np.frombuffer(contents, np.uint8)
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
         if img is None:
-            return {"error": "Invalid image format or corrupted file."}
+            return {"error": "Invalid image format"}
 
         try:
             collab_list = json.loads(collaborators)
         except:
             collab_list = []
 
-        # 3. Run audit
-        # Wrapped in a try-except to catch 500 errors in Swagger
+        # Run audit logic
         report, _ = generate_report(img, logo_model, post_type, collab_list)
-
         return report
 
     except Exception as e:
-        # This will now show the SPECIFIC error in Swagger UI instead of just '500'
-        return {"status": "error", "message": f"Audit failed: {str(e)}"}
+        # This catch-all ensures your presentation doesn't just show '500'
+        return {
+            "status": "error", 
+            "message": f"Critical Audit Failure: {str(e)}",
+            "tip": "Check Render logs for memory overflow if the error persists."
+        }
